@@ -16,83 +16,67 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Validate configuration
+      - name: Validate Facebook credentials
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-          FB_PAGE_ID: ${{ vars.FB_PAGE_ID || '1360132067172555' }}
-          VIDEO_URL: ${{ vars.VIDEO_URL }}
         run: |
           set -euo pipefail
           if [ -z "${FB_PAGE_ACCESS_TOKEN}" ]; then
             echo "::error::Add FB_PAGE_ACCESS_TOKEN under Settings → Secrets and variables → Actions → Secrets."
             exit 1
           fi
-          if [ -z "${FB_PAGE_ID}" ]; then
-            echo "::error::Set the FB_PAGE_ID repository variable."
-            exit 1
-          fi
-          if [ -z "${VIDEO_URL}" ]; then
-            echo "::notice::VIDEO_URL is empty. Create today's video in Flow, host the MP4 at a direct HTTPS URL, and set VIDEO_URL. Nothing was posted."
-            exit 0
-          fi
-          case "${VIDEO_URL}" in
-            https://*.mp4|https://*\.mp4\?*) ;;
-            *)
-              echo "::error::VIDEO_URL is not a direct MP4 file URL. A Facebook share/reel page URL cannot be used as file_url. Set VIDEO_URL to a publicly accessible HTTPS URL that downloads the actual .mp4 video."
-              exit 1
-              ;;
-          esac
 
-      - name: Publish video to Facebook Page
-        id: publish
+      - name: Install video tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install --upgrade pip
+          python -m pip install pillow edge-tts
+
+      - name: Generate today's video and narration
+        run: |
+          set -euo pipefail
+          python scripts/create_daily_video.py
+          edge-tts --voice en-US-GuyNeural --rate="+3%" --text "$(cat output/narration.txt)" --write-media output/narration.mp3
+          # Make a 60-second vertical video from the six generated cinematic scene cards.
+          # Each scene is displayed for ten seconds, with narration and a low-volume ambience-free mix.
+          ffmpeg -y \
+            -loop 1 -t 10 -i output/scene1.png \
+            -loop 1 -t 10 -i output/scene2.png \
+            -loop 1 -t 10 -i output/scene3.png \
+            -loop 1 -t 10 -i output/scene4.png \
+            -loop 1 -t 10 -i output/scene5.png \
+            -loop 1 -t 10 -i output/scene6.png \
+            -i output/narration.mp3 \
+            -filter_complex "[0:v]scale=720:1280,setsar=1[v0];[1:v]scale=720:1280,setsar=1[v1];[2:v]scale=720:1280,setsar=1[v2];[3:v]scale=720:1280,setsar=1[v3];[4:v]scale=720:1280,setsar=1[v4];[5:v]scale=720:1280,setsar=1[v5];[v0][v1][v2][v3][v4][v5]concat=n=6:v=1:a=0,format=yuv420p[v]" \
+            -map "[v]" -map 6:a -t 60 -r 24 -c:v libx264 -preset veryfast -crf 25 -c:a aac -b:a 128k -shortest output/unseen-files-daily.mp4
+          test -s output/unseen-files-daily.mp4
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 output/unseen-files-daily.mp4
+
+      - name: Publish generated video to Facebook Page
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
           FB_PAGE_ID: ${{ vars.FB_PAGE_ID || '1360132067172555' }}
-          VIDEO_URL: ${{ vars.VIDEO_URL }}
-          VIDEO_DESCRIPTION: ${{ vars.VIDEO_DESCRIPTION }}
         run: |
           set -euo pipefail
-          if [ -z "${VIDEO_URL:-}" ]; then
-            echo "No VIDEO_URL configured; safely skipping publish."
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          mkdir -p state
-          LAST_URL=""
-          if [ -f state/last_video_url.txt ]; then
-            LAST_URL="$(cat state/last_video_url.txt)"
-          fi
-          if [ "${VIDEO_URL}" = "${LAST_URL}" ]; then
-            echo "::notice::This video URL was already published. Skipping to prevent duplicate posts."
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          CAPTION="${VIDEO_DESCRIPTION:-Unseen Files — disturbing truths, hidden mysteries, and stories that stay with you. Follow for more.}"
+          CAPTION="$(cat output/caption.txt)"
           RESPONSE="$(curl --fail-with-body --silent --show-error --request POST \
             "https://graph.facebook.com/v23.0/${FB_PAGE_ID}/videos" \
-            --form-string "file_url=${VIDEO_URL}" \
+            --form "source=@output/unseen-files-daily.mp4;type=video/mp4" \
             --form-string "description=${CAPTION}" \
             --form-string "access_token=${FB_PAGE_ACCESS_TOKEN}")"
-
           echo "$RESPONSE" | python -c 'import json,sys; d=json.load(sys.stdin); print("Facebook video ID:", d.get("id", "no ID returned")); sys.exit(0 if d.get("id") else 1)'
-          printf '%s' "${VIDEO_URL}" > state/last_video_url.txt
-          echo "skipped=false" >> "$GITHUB_OUTPUT"
 
-      - name: Save duplicate-prevention state
-        if: success() && steps.publish.outputs.skipped != 'true'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/last_video_url.txt
-          if ! git diff --cached --quiet; then
-            git commit -m "Record published Unseen Files video"
-            git push
-          fi
+      - name: Save generated video as a workflow artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unseen-files-generated-video
+          path: output/
+          if-no-files-found: warn
+          retention-days: 3
