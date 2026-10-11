@@ -24,7 +24,7 @@ jobs:
       - name: Validate configuration
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-          FB_PAGE_ID: ${{ vars.FB_PAGE_ID }}
+          FB_PAGE_ID: ${{ vars.FB_PAGE_ID || '1360132067172555' }}
           VIDEO_URL: ${{ vars.VIDEO_URL }}
         run: |
           set -euo pipefail
@@ -42,14 +42,17 @@ jobs:
           fi
           case "${VIDEO_URL}" in
             https://*.mp4|https://*\.mp4\?*) ;;
-            *) echo "::warning::VIDEO_URL should be a direct HTTPS URL to an MP4 file. Facebook may reject share-page URLs." ;;
+            *)
+              echo "::error::VIDEO_URL is not a direct MP4 file URL. A Facebook share/reel page URL cannot be used as file_url. Set VIDEO_URL to a publicly accessible HTTPS URL that downloads the actual .mp4 video."
+              exit 1
+              ;;
           esac
 
       - name: Publish video to Facebook Page
         id: publish
         env:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-          FB_PAGE_ID: ${{ vars.FB_PAGE_ID }}
+          FB_PAGE_ID: ${{ vars.FB_PAGE_ID || '1360132067172555' }}
           VIDEO_URL: ${{ vars.VIDEO_URL }}
           VIDEO_DESCRIPTION: ${{ vars.VIDEO_DESCRIPTION }}
         run: |
